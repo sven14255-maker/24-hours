@@ -3,16 +3,21 @@ import time
 from pathlib import Path
 
 import cv2
-import playsound3
+import playsound
 
 
 class Camera:
     def __init__(self):
         self.cap = cv2.VideoCapture(0)
-        self.alert_sound = Path("alert.mp3")
+
+        self.alert_sound = Path(__file__).parent / "includes" / "alert.mp3"
         self.alert_cooldown_seconds = 3
         self.last_alert_time = 0
         self.alert_is_playing = False
+
+        # ⏱️ NEW: no-eyes timer
+        self.no_eyes_start_time = None
+        self.no_eyes_threshold = 2  # seconds
 
         self.face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -34,10 +39,19 @@ class Camera:
                 break
 
             frame = cv2.flip(frame, 1)
-            looking_at_screen, status = self._is_looking_at_screen(frame)
 
-            if not looking_at_screen:
-                self._play_alert()
+            looking_at_screen, status, eyes_visible = self._is_looking_at_screen(frame)
+
+            # ⏱️ NEW: 2-second rule for no eyes
+            now = time.monotonic()
+
+            if not eyes_visible:
+                if self.no_eyes_start_time is None:
+                    self.no_eyes_start_time = now
+                elif now - self.no_eyes_start_time >= self.no_eyes_threshold:
+                    self._play_alert()
+            else:
+                self.no_eyes_start_time = None
 
             self._draw_status(frame, status, looking_at_screen)
             cv2.imshow("Camera", frame)
@@ -50,6 +64,7 @@ class Camera:
 
     def _is_looking_at_screen(self, frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
         faces = self.face_cascade.detectMultiScale(
             gray,
             scaleFactor=1.1,
@@ -58,12 +73,13 @@ class Camera:
         )
 
         if len(faces) == 0:
-            return False, "No face detected"
+            return False, "No face detected", False
 
-        x, y, width, height = max(faces, key=lambda face: face[2] * face[3])
-        self._draw_box(frame, x, y, width, height)
+        x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+        self._draw_box(frame, x, y, w, h)
 
-        face_gray = gray[y : y + height, x : x + width]
+        face_gray = gray[y:y + h, x:x + w]
+
         eyes = self.eye_cascade.detectMultiScale(
             face_gray,
             scaleFactor=1.1,
@@ -71,23 +87,27 @@ class Camera:
             minSize=(20, 20),
         )
 
-        frame_height, frame_width = frame.shape[:2]
-        face_center_x = x + width / 2
-        face_center_y = y + height / 2
-        centered_x = abs(face_center_x - frame_width / 2) < frame_width * 0.22
-        centered_y = abs(face_center_y - frame_height / 2) < frame_height * 0.28
-        enough_eyes_visible = len(eyes) >= 2
+        frame_h, frame_w = frame.shape[:2]
 
-        if centered_x and centered_y and enough_eyes_visible:
-            return True, "Looking at screen"
+        face_cx = x + w / 2
+        face_cy = y + h / 2
 
-        if not enough_eyes_visible:
-            return False, "Look at screen - eyes not visible"
+        centered_x = abs(face_cx - frame_w / 2) < frame_w * 0.22
+        centered_y = abs(face_cy - frame_h / 2) < frame_h * 0.28
 
-        return False, "Look at screen - face turned away"
+        eyes_visible = len(eyes) >= 2
+
+        if centered_x and centered_y and eyes_visible:
+            return True, "Looking at screen", True
+
+        if not eyes_visible:
+            return False, "Eyes not visible", False
+
+        return False, "Face turned away", True
 
     def _play_alert(self):
         now = time.monotonic()
+
         if now - self.last_alert_time < self.alert_cooldown_seconds:
             return
         if self.alert_is_playing:
@@ -96,24 +116,24 @@ class Camera:
         self.last_alert_time = now
 
         if not self.alert_sound.exists():
-            print("Alert: look at the screen. Add alert.mp3 to play a sound.")
+            print("Alert: look at the screen (no audio file found).")
             return
 
         self.alert_is_playing = True
-        thread = threading.Thread(target=self._play_alert_sound, daemon=True)
-        thread.start()
+        threading.Thread(target=self._play_alert_sound, daemon=True).start()
 
     def _play_alert_sound(self):
         try:
-            playsound3.playsound(str(self.alert_sound))
+            playsound.playsound(str(self.alert_sound))
         finally:
             self.alert_is_playing = False
 
-    def _draw_box(self, frame, x, y, width, height):
-        cv2.rectangle(frame, (x, y), (x + width, y + height), (0, 180, 255), 2)
+    def _draw_box(self, frame, x, y, w, h):
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 180, 255), 2)
 
-    def _draw_status(self, frame, status, looking_at_screen):
-        color = (0, 180, 0) if looking_at_screen else (0, 0, 255)
+    def _draw_status(self, frame, status, looking):
+        color = (0, 255, 0) if looking else (0, 0, 255)
+
         cv2.putText(
             frame,
             status,
@@ -127,5 +147,4 @@ class Camera:
 
 
 if __name__ == "__main__":
-    camera = Camera()
-    camera.detect_face()
+    Camera().detect_face()
